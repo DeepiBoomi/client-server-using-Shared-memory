@@ -1,0 +1,171 @@
+//server
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
+#include <unistd.h>
+#include <semaphore.h>
+#define PORT 9090
+#define MAX_CLIENTS 100
+#define SHM_KEY 4
+#define SHM_SIZE 1024
+sem_t *semaphore;
+void *client_handler(void *socket_desc) {
+ int client_sock = *(int*)socket_desc;
+ free(socket_desc);
+ struct sockaddr_in client;
+ socklen_t client_len = sizeof(client);
+ getpeername(client_sock, (struct sockaddr*)&client, &client_len);
+ char client_ip[INET_ADDRSTRLEN];
+ inet_ntop(AF_INET, &(client.sin_addr), client_ip, INET_ADDRSTRLEN);
+ printf("Client connected: \n");
+
+ 
+ // Access shared memory
+ int shm_id = shmget(SHM_KEY, SHM_SIZE, 0666);
+ if (shm_id == -1) {
+ perror("Failed to open shared memory");
+ return NULL;
+ }
+ char *shared_mem = (char*)shmat(shm_id, NULL, 0);
+ if (shared_mem == (char*)-1) {
+ perror("Failed to attach shared memory");
+ return NULL;
+ }
+ 
+ // Handle client communication
+ char buffer[256];
+ while (1) {
+ memset(buffer, 0, 256);
+ int read_size = recv(client_sock, buffer, 256, 0);
+ if (read_size <= 0) {
+ break;
+ }printf("Thread is created\n");
+ 
+ printf("Received message from client : %s\n", buffer);
+ 
+ sem_wait(semaphore);
+ strcpy(shared_mem, buffer); // Write to shared memory
+ sem_post(semaphore);
+ 
+ // Echo back to client
+ send(client_sock, buffer, strlen(buffer), 0);
+ }
+ 
+ printf("Client disconnected: \n");
+ 
+ close(client_sock);
+ return NULL;
+}
+int main() {
+
+ int server_fd, client_sock, *new_sock;
+ struct sockaddr_in server, client;
+ socklen_t client_len = sizeof(client);
+ pthread_t client_threads[MAX_CLIENTS];
+ int client_count = 0;
+ 
+ // Initialize semaphore
+ semaphore = sem_open("/sem_example", O_CREAT, 0666, 1);
+ if (semaphore == SEM_FAILED) {
+ perror("Failed to initialize semaphore");
+ return 1;
+ }
+ 
+ // Create socket
+ server_fd = socket(AF_INET, SOCK_STREAM, 0);
+ if (server_fd == -1) {
+ perror("Could not create socket");
+ return 1;
+ }
+ printf("Socket created\n");
+ 
+ // Set SO_REUSEADDR option
+ int opt = 1;
+ if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
+ perror("setsockopt failed");
+ close(server_fd);
+ return 1;
+ }
+ 
+ // Prepare the sockaddr_in structure
+ server.sin_family = AF_INET;
+ server.sin_addr.s_addr = INADDR_ANY;
+ server.sin_port = htons(PORT);
+ 
+ // Bind
+ if (bind(server_fd, (struct sockaddr *)&server, sizeof(server)) < 0) {
+ perror("Bind failed");
+ close(server_fd);
+ return 1;
+ }
+
+ printf("Bind successful\n");
+ 
+ // Listen
+ if (listen(server_fd, 3) < 0) {
+ perror("Listen failed");
+ close(server_fd);
+ return 1;
+ }
+ printf("Server listening on port %d...\n", PORT);
+ 
+ // Create shared memory
+ int shm_id = shmget(SHM_KEY, SHM_SIZE, IPC_CREAT | 0666);
+ if (shm_id == -1) {
+ perror("Failed to create shared memory");
+ return 1;
+ }
+ // printf("Shared Memory Key: %#x\n", SHM_KEY); // Print shared memory key in hex
+ printf("Shared Memory ID: %d\n", shm_id); // Print shared memory ID
+ char *shared_mem = (char*)shmat(shm_id, NULL, 0);
+ if (shared_mem == (char*)-1) {
+ perror("Failed to attach shared memory");
+ return 1;
+ }
+ 
+ // Accept incoming connections and handle them in separate threads
+ while ((client_sock = accept(server_fd, (struct sockaddr *)&client, &client_len))) {
+ printf("Connection accepted\n");
+ 
+ // Create a new thread for this client
+ new_sock = malloc(sizeof(int));
+ *new_sock = client_sock;
+ 
+ if (pthread_create(&client_threads[client_count], NULL, client_handler, (void*) 
+new_sock) < 0) {
+ perror("Could not create thread");
+ return 1;
+ }
+ 
+
+ client_count++;
+ if (client_count >= MAX_CLIENTS) {
+ printf("Maximum clients reached. No longer accepting connections.\n");
+ break;
+ }
+ }
+ 
+ if (client_sock < 0) {
+ perror("Accept failed");
+ return 1;
+ }
+ 
+ // Join all client threads before exiting
+ for (int i = 0; i < client_count; i++) {
+ pthread_join(client_threads[i], NULL);
+ }
+ 
+ // Cleanup
+ shmctl(shm_id, IPC_RMID, NULL);
+ sem_close(semaphore);
+ sem_unlink("/sem_example");
+ 
+ return 0;
+}
